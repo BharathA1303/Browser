@@ -94,11 +94,39 @@ class RenderTreeBuilder:
             "font-size": f"{CONFIG.default_font_size}px",
             "font-weight": "normal",
             "color": "black",
+            "line-height": "1.4em",
         }
 
         tag = node.tag_name.lower()
-        if tag in {"document", "html", "body", "div", "p", "h1", "h2", "h3", "ul", "ol", "li"}:
+        if tag in {
+            "document",
+            "html",
+            "body",
+            "div",
+            "p",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "ul",
+            "ol",
+            "li",
+            "table",
+            "tr",
+            "header",
+            "footer",
+            "nav",
+            "section",
+            "article",
+            "main",
+            "td",
+            "th",
+        }:
             defaults["display"] = "block"
+        elif tag in {"img", "button", "input"}:
+            defaults["display"] = "inline-block"
         else:
             defaults["display"] = "inline"
 
@@ -113,5 +141,7 @@ class RenderTreeBuilder:
             defaults["font-weight"] = "bold"
         elif tag == "a":
             defaults["color"] = "#0000EE"
+        elif tag == "p":
+            defaults["margin-bottom"] = "0.9em"
 
         return defaults

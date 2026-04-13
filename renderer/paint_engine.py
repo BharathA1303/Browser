@@ -162,7 +162,10 @@ class PaintEngine:
                 )
             return
 
-        if node.tag_name == "#text" and node.text_content.strip():
+        text_content = box.text_fragment if box.text_fragment is not None else node.text_content
+        if node.tag_name == "#text" and text_content:
+            if text_content.isspace():
+                return
             color = self.sanitize_color(style.get("color", "#000000")) or self.sanitize_color("#000000")
             font_size = int(self._to_px(style.get("font-size", str(CONFIG.default_font_size))) or CONFIG.default_font_size)
             font_weight = "bold" if style.get("font-weight", "").strip().lower() in {"bold", "700", "800", "900"} else "normal"
@@ -175,9 +178,9 @@ class PaintEngine:
             )
             item_id = self._safe_canvas_call(
                 lambda: canvas.create_text(
-                    box.x + 2,
-                    box.y + 2,
-                    text=node.text_content.strip(),
+                    box.x,
+                    box.y,
+                    text=text_content,
                     anchor="nw",
                     fill=color,
                     font=text_font,
