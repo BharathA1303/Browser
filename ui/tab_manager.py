@@ -1,159 +1,129 @@
-"""Tab management for independent browser engines."""
+"""WebView window-backed tab manager."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import tkinter as tk
-from tkinter import ttk
 from typing import Callable, Dict, Optional
+
+import webview
 
 from engine.browser_engine import BrowserEngine
 
 
 @dataclass
 class BrowserTab:
-    """Represents one browser tab state."""
+    """Represents one tab backed by a pywebview window."""
 
     tab_id: str
-    tab_frame: tk.Frame
-    body_frame: tk.Frame
-    canvas: tk.Canvas
-    scrollbar_y: ttk.Scrollbar
+    window: webview.Window
     engine: BrowserEngine
     title: str = "New Tab"
     current_url: str = ""
-    last_response_size_bytes: int | None = None
-    tab_button: tk.Button | None = None
-    close_button: tk.Button | None = None
+    closed: bool = False
 
 
 class TabManager:
-    """Manage opening, switching and closing tabs."""
+    """Create, track, switch, and close pywebview tabs."""
 
     def __init__(
         self,
-        tab_strip: tk.Frame,
-        content_area: tk.Frame,
-        on_tab_created: Callable[[BrowserTab], None] | None = None,
-        on_tab_selected: Callable[[BrowserTab], None] | None = None,
+        on_tab_created: Callable[[BrowserTab], None],
+        on_tab_closed: Callable[[str], None],
     ) -> None:
-        """Initialize tab container and internal map."""
+        """Initialize tab state and callbacks."""
 
-        self.tab_strip = tab_strip
-        self.content_area = content_area
-        self.tabs: Dict[str, BrowserTab] = {}
-        self.selected_tab_id: str | None = None
-        self._tab_counter = 0
         self._on_tab_created = on_tab_created
-        self._on_tab_selected = on_tab_selected
-        self.plus_button = tk.Button(self.tab_strip, text="+", width=3)
-        self.plus_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self._on_tab_closed = on_tab_closed
+        self._tabs: Dict[str, BrowserTab] = {}
+        self._active_tab_id: str | None = None
+        self._counter = 0
 
-    def open_tab(self, title: str = "New Tab") -> BrowserTab:
-        """Create and select a new tab with independent engine."""
+    def create_tab(self, home_url: str, js_api: object, tab_id: str | None = None) -> BrowserTab:
+        """Create a new WebView window tab and activate it."""
 
-        self._tab_counter += 1
-        tab_id = f"tab-{self._tab_counter}"
-
-        tab_frame = tk.Frame(self.tab_strip, bd=1, relief=tk.RAISED)
-        tab_frame.pack(side=tk.LEFT, padx=(0, 4), pady=(2, 0))
-
-        body_frame = tk.Frame(self.content_area)
-        canvas = tk.Canvas(body_frame, bg="white")
-        scrollbar_y = ttk.Scrollbar(body_frame, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar_y.set)
-
-        scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        label_button = tk.Button(
-            tab_frame,
-            text=title,
-            bd=0,
-            padx=10,
-            pady=2,
-            command=lambda tid=tab_id: self.select_tab(tid),
+        if tab_id is None:
+            tab_id = self.allocate_tab_id()
+        window = webview.create_window(
+            title="New Tab - Browser v1",
+            url=home_url,
+            js_api=js_api,
+            width=1200,
+            height=800,
+            confirm_close=False,
         )
-        label_button.pack(side=tk.LEFT)
-
-        close_button = tk.Button(
-            tab_frame,
-            text="×",
-            bd=0,
-            padx=4,
-            pady=2,
-            command=lambda tid=tab_id: self.close_tab(tid),
-        )
-        close_button.pack(side=tk.LEFT)
-
-        tab = BrowserTab(
-            tab_id=tab_id,
-            tab_frame=tab_frame,
-            body_frame=body_frame,
-            canvas=canvas,
-            scrollbar_y=scrollbar_y,
-            engine=BrowserEngine(),
-            title=title,
-            tab_button=label_button,
-            close_button=close_button,
-        )
-        self.tabs[tab_id] = tab
-        self.plus_button.configure(command=self._open_and_select_new_tab)
-        if self._on_tab_created:
-            self._on_tab_created(tab)
-        self.select_tab(tab_id)
+        tab = BrowserTab(tab_id=tab_id, window=window, engine=BrowserEngine())
+        self._tabs[tab_id] = tab
+        self._active_tab_id = tab_id
+        self._on_tab_created(tab)
         return tab
 
-    def current_tab(self) -> Optional[BrowserTab]:
-        """Return currently selected tab."""
+    def allocate_tab_id(self) -> str:
+        """Reserve and return a unique tab identifier."""
 
-        if self.selected_tab_id and self.selected_tab_id in self.tabs:
-            return self.tabs[self.selected_tab_id]
-        return next(iter(self.tabs.values()), None)
+        self._counter += 1
+        return f"tab-{self._counter}"
 
-    def switch_to(self, tab_id: str) -> Optional[BrowserTab]:
-        """Switch to tab by identifier."""
+    def get_tab(self, tab_id: str) -> Optional[BrowserTab]:
+        """Get a tab by id."""
 
-        return self.select_tab(tab_id)
+        return self._tabs.get(tab_id)
 
-    def select_tab(self, tab_id: str) -> Optional[BrowserTab]:
-        """Show one tab body and update the selected tab state."""
+    def active_tab(self) -> Optional[BrowserTab]:
+        """Return current active tab."""
 
-        tab = self.tabs.get(tab_id)
-        if not tab:
+        if self._active_tab_id is None:
+            return None
+        return self._tabs.get(self._active_tab_id)
+
+    def activate_tab(self, tab_id: str) -> Optional[BrowserTab]:
+        """Activate and focus a specific tab."""
+
+        tab = self._tabs.get(tab_id)
+        if not tab or tab.closed:
             return None
 
-        if self.selected_tab_id and self.selected_tab_id in self.tabs:
-            current = self.tabs[self.selected_tab_id]
-            current.body_frame.pack_forget()
-            current.tab_frame.configure(relief=tk.RAISED)
-
-        tab.body_frame.pack(fill=tk.BOTH, expand=True)
-        tab.tab_frame.configure(relief=tk.SUNKEN)
-        self.selected_tab_id = tab_id
-        if self._on_tab_selected:
-            self._on_tab_selected(tab)
+        self._active_tab_id = tab_id
+        if hasattr(tab.window, "restore"):
+            tab.window.restore()
+        if hasattr(tab.window, "show"):
+            tab.window.show()
+        if hasattr(tab.window, "bring_to_front"):
+            tab.window.bring_to_front()
         return tab
 
     def close_tab(self, tab_id: str) -> None:
-        """Close tab and select another remaining tab."""
+        """Close a tab window and update active tab state."""
 
-        tab = self.tabs.pop(tab_id, None)
+        tab = self._tabs.get(tab_id)
+        if not tab or tab.closed:
+            return
+
+        tab.closed = True
+        if hasattr(tab.window, "destroy"):
+            tab.window.destroy()
+
+        self._tabs.pop(tab_id, None)
+        self._on_tab_closed(tab_id)
+
+        if self._active_tab_id == tab_id:
+            self._active_tab_id = next(iter(self._tabs.keys()), None)
+            if self._active_tab_id:
+                self.activate_tab(self._active_tab_id)
+
+    def handle_window_closed(self, tab_id: str) -> None:
+        """Remove tab state when user closes the native window."""
+
+        tab = self._tabs.get(tab_id)
         if not tab:
             return
-        if self.selected_tab_id == tab_id:
-            self.selected_tab_id = None
-        tab.body_frame.destroy()
-        tab.tab_frame.destroy()
-        if not self.tabs:
-            self.open_tab()
-            return
+        tab.closed = True
+        self._tabs.pop(tab_id, None)
+        self._on_tab_closed(tab_id)
 
-        if self.selected_tab_id is None:
-            next_tab_id = next(iter(self.tabs.keys()))
-            self.select_tab(next_tab_id)
+        if self._active_tab_id == tab_id:
+            self._active_tab_id = next(iter(self._tabs.keys()), None)
 
-    def _open_and_select_new_tab(self) -> None:
-        """Open a new tab from the plus button."""
+    def list_tabs(self) -> list[BrowserTab]:
+        """Return all live tabs."""
 
-        self.open_tab()
+        return [tab for tab in self._tabs.values() if not tab.closed]

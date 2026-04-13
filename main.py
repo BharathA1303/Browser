@@ -4,7 +4,7 @@ from ui.window import BrowserWindow
 
 
 def main() -> None:
-    """Launch the browser window."""
+    """Launch the WebView2-powered browser window."""
 
     window = BrowserWindow()
     window.run()

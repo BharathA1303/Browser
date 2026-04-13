@@ -1,296 +1,363 @@
-"""Main tkinter browser window."""
+"""WebView2-powered browser window orchestration."""
 
 from __future__ import annotations
 
-from html import escape
-import tkinter as tk
-from tkinter import ttk
+import json
+from typing import Any
 
-from engine.event_loop import EventLoop
-from engine.browser_engine import NavigationResult
-from renderer.paint_engine import PaintEngine
-from ui.address_bar import AddressBar
+import webview
+
+from storage.bookmarks import BookmarksManager
 from ui.tab_manager import BrowserTab, TabManager
-from storage.bookmarks import BookmarksManager, BookmarkEntry
-from utils.config import CONFIG
 from utils.logger import get_logger
 
 
-class BrowserWindow:
-    """Main window with controls, tabs and viewport."""
+class _ToolbarApi:
+    """JavaScript bridge API for toolbar actions."""
 
-    def __init__(self) -> None:
-        """Build the full browser UI and wire callbacks."""
+    def __init__(self, app: "BrowserWindow", tab_id: str) -> None:
+        """Bind toolbar API methods to a tab context."""
 
-        self.logger = get_logger("ui.window")
-        self.root = tk.Tk()
-        self.root.title("Browser v1")
-        self.root.geometry(f"{CONFIG.default_window_width}x{CONFIG.default_window_height}")
+        self._app = app
+        self._tab_id = tab_id
 
-        self.event_loop = EventLoop()
-        self.paint_engine = PaintEngine()
-        self.bookmarks = BookmarksManager()
+    def navigate(self, text: str) -> None:
+        """Navigate current tab from address-bar input."""
 
-        self._build_controls()
-        self._build_viewport()
-
-        self.tabs = TabManager(
-            self.tab_strip,
-            self.content_area,
-            on_tab_created=self._bind_new_tab,
-            on_tab_selected=self._on_tab_selected,
-        )
-        first_tab = self.tabs.open_tab()
-
-        self.root.after(20, self._pump_events)
-
-    def _build_controls(self) -> None:
-        """Create navigation controls and address bar."""
-
-        controls = tk.Frame(self.root)
-        controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
-
-        self.back_button = tk.Button(controls, text="←", width=4, command=self.go_back)
-        self.back_button.pack(side=tk.LEFT, padx=(0, 4))
-
-        self.forward_button = tk.Button(controls, text="→", width=4, command=self.go_forward)
-        self.forward_button.pack(side=tk.LEFT, padx=(0, 4))
-
-        self.refresh_button = tk.Button(controls, text="⟳", width=4, command=self.refresh)
-        self.refresh_button.pack(side=tk.LEFT, padx=(0, 8))
-
-        self.bookmark_button = tk.Button(controls, text="★", width=4, command=self.add_bookmark)
-        self.bookmark_button.pack(side=tk.LEFT, padx=(0, 4))
-
-        self.bookmark_menu_button = tk.Menubutton(controls, text="Bookmarks", relief=tk.RAISED, width=10)
-        self.bookmark_menu = tk.Menu(self.bookmark_menu_button, tearoff=0)
-        self.bookmark_menu.configure(postcommand=self._refresh_bookmarks_menu)
-        self.bookmark_menu_button.configure(menu=self.bookmark_menu)
-        self.bookmark_menu_button.pack(side=tk.LEFT, padx=(0, 8))
-
-        self.address_bar = AddressBar(controls)
-        self.address_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.address_bar.set_on_submit(self.navigate)
-
-    def _build_viewport(self) -> None:
-        """Create tab notebook and content viewport."""
-
-        self.tab_strip = tk.Frame(self.root)
-        self.tab_strip.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 4))
-
-        self.content_area = tk.Frame(self.root)
-        self.content_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-    def _on_tab_selected(self, tab: BrowserTab) -> None:
-        """Sync the address bar when the active tab changes."""
-
-        self.address_bar.set_url(tab.current_url)
-        title_source = tab.title if tab.current_url else "Browser v1"
-        self._update_window_title(title_source)
-        if tab.last_response_size_bytes is not None:
-            self.address_bar.set_done(tab.last_response_size_bytes)
-        else:
-            self.address_bar.set_ready()
-
-    def _bind_new_tab(self, tab: BrowserTab) -> None:
-        """Bind scroll behavior for each newly created tab."""
-
-        self._bind_canvas_scrolling(tab.canvas)
-
-    def _pump_events(self) -> None:
-        """Tick custom event loop periodically from tkinter loop."""
-
-        self.event_loop.tick()
-        self.root.after(20, self._pump_events)
-
-    def navigate(self, url: str, record_history: bool = True) -> None:
-        """Navigate current tab to a URL."""
-
-        tab = self.tabs.current_tab()
-        if not tab:
-            return
-
-        if url.strip().lower() == "browser://history":
-            self.address_bar.set_loading(True)
-            self.root.update_idletasks()
-            self._show_history_page()
-            self.address_bar.set_loading(False)
-            return
-
-        self.address_bar.set_loading(True)
-        self.root.update_idletasks()
-
-        try:
-            viewport_width = max(tab.canvas.winfo_width(), 300)
-            result = tab.engine.navigate(
-                url,
-                viewport_width=viewport_width,
-                record_history=record_history,
-            )
-            self.paint_engine.paint(
-                tab.canvas,
-                result.layout_root,
-                current_url=result.final_url,
-                navigate_callback=self.navigate,
-            )
-            visible_width = max(tab.canvas.winfo_width(), viewport_width)
-            visible_height = max(tab.canvas.winfo_height(), int(result.layout_root.height))
-            tab.canvas.configure(scrollregion=(0, 0, visible_width, visible_height))
-            tab.title = result.page_title or result.final_url
-            tab.current_url = result.final_url
-            tab.last_response_size_bytes = result.response_size_bytes
-            if tab.tab_button is not None:
-                tab.tab_button.configure(text=tab.title[:25])
-            self.address_bar.set_url(result.final_url)
-            self.address_bar.set_done(result.response_size_bytes)
-            self._update_window_title(tab.title)
-        except Exception as error:  # noqa: BLE001
-            tab.canvas.delete("all")
-            tab.canvas.create_text(20, 20, text=f"Navigation error: {error}", anchor="nw", fill="red")
-            self.logger.exception("Navigation failed")
-            self.address_bar.set_error()
-        finally:
-            if not (url.strip().lower() == "browser://history"):
-                self.address_bar.set_loading(False)
+        self._app.navigate_tab(self._tab_id, text)
 
     def go_back(self) -> None:
-        """Navigate to previous history entry in current tab."""
+        """Navigate browser history back in current tab."""
 
-        tab = self.tabs.current_tab()
-        if not tab:
-            return
-        previous = tab.engine.history.back()
-        if previous:
-            self.navigate(previous, record_history=False)
+        self._app.eval_js(self._tab_id, "history.back();")
 
     def go_forward(self) -> None:
-        """Navigate to next history entry in current tab."""
+        """Navigate browser history forward in current tab."""
 
-        tab = self.tabs.current_tab()
-        if not tab:
-            return
-        next_url = tab.engine.history.forward()
-        if next_url:
-            self.navigate(next_url, record_history=False)
+        self._app.eval_js(self._tab_id, "history.forward();")
 
     def refresh(self) -> None:
-        """Refresh current URL."""
+        """Reload the current document."""
 
-        current = self.address_bar.get_url()
-        if current:
-            self.navigate(current)
+        self._app.eval_js(self._tab_id, "location.reload();")
 
     def add_bookmark(self) -> None:
-        """Save the current page to bookmarks."""
+        """Save current tab URL and title to bookmarks."""
 
-        tab = self.tabs.current_tab()
+        self._app.add_bookmark(self._tab_id)
+
+    def open_bookmark(self, url: str) -> None:
+        """Open selected bookmark URL."""
+
+        if url:
+            self._app.navigate_tab(self._tab_id, url)
+
+    def new_tab(self) -> None:
+        """Create a new tab window."""
+
+        self._app.create_tab()
+
+    def switch_tab(self, tab_id: str) -> None:
+        """Switch focus to another tab."""
+
+        self._app.activate_tab(tab_id)
+
+    def close_tab(self, tab_id: str) -> None:
+        """Close a target tab."""
+
+        self._app.close_tab(tab_id)
+
+
+class BrowserWindow:
+    """Main pywebview-based browser application."""
+
+    HOME_URL = "https://www.google.com"
+
+    def __init__(self) -> None:
+        """Initialize browser window, tab manager, and persistence services."""
+
+        self.logger = get_logger("ui.window")
+        self.bookmarks = BookmarksManager()
+        self.tabs = TabManager(
+            on_tab_created=self._on_tab_created,
+            on_tab_closed=self._on_tab_closed,
+        )
+        self._shutdown_requested = False
+        self.create_tab(self.HOME_URL)
+
+    def run(self) -> None:
+        """Start the pywebview event loop (WebView2 on Windows)."""
+
+        webview.start(debug=False)
+
+    def create_tab(self, initial_url: str | None = None) -> BrowserTab:
+        """Create and return a new tab window."""
+
+        url = initial_url or self.HOME_URL
+        tab_id = self.tabs.allocate_tab_id()
+        api = _ToolbarApi(self, tab_id)
+        tab = self.tabs.create_tab(home_url=url, js_api=api, tab_id=tab_id)
+
+        tab.window.events.loaded += lambda: self._on_loaded(tab.tab_id)
+        tab.window.events.closed += lambda: self._on_window_closed(tab.tab_id)
+        return tab
+
+    def activate_tab(self, tab_id: str) -> None:
+        """Focus and show a tab window."""
+
+        tab = self.tabs.activate_tab(tab_id)
+        if tab:
+            self._inject_toolbar(tab, status="Done")
+
+    def close_tab(self, tab_id: str) -> None:
+        """Close tab and exit when all tabs are closed."""
+
+        self.tabs.close_tab(tab_id)
+        if not self.tabs.list_tabs() and not self._shutdown_requested:
+            self._shutdown_requested = True
+            webview.stop()
+
+    def navigate_tab(self, tab_id: str, user_input: str) -> None:
+        """Navigate a tab from address-bar style input."""
+
+        tab = self.tabs.get_tab(tab_id)
+        if not tab or tab.closed:
+            return
+
+        nav = tab.engine.resolve_input(user_input)
+        self._inject_toolbar(tab, status="Loading...")
+
+        if nav.is_internal and nav.target_url == "browser://history":
+            tab.window.load_html(nav.html_content)
+            tab.current_url = nav.target_url
+            tab.title = "Browsing History"
+            tab.engine.record_visit(tab.current_url, tab.title)
+            self._set_window_title(tab)
+            self._inject_toolbar(tab, status="Done")
+            return
+
+        tab.window.load_url(nav.target_url)
+
+    def add_bookmark(self, tab_id: str) -> None:
+        """Add current tab page to bookmark storage."""
+
+        tab = self.tabs.get_tab(tab_id)
         if not tab or not tab.current_url:
             return
         self.bookmarks.add(tab.current_url, tab.title or tab.current_url)
-        self._refresh_bookmarks_menu()
+        self._inject_toolbar(tab, status="Done")
 
-    def _refresh_bookmarks_menu(self) -> None:
-        """Rebuild the bookmarks dropdown from disk."""
+    def eval_js(self, tab_id: str, script: str) -> Any:
+        """Evaluate JavaScript in a tab window safely."""
 
-        self.bookmark_menu.delete(0, tk.END)
-        bookmarks = self.bookmarks.load()
-        if not bookmarks:
-            self.bookmark_menu.add_command(label="No bookmarks yet", state=tk.DISABLED)
+        tab = self.tabs.get_tab(tab_id)
+        if not tab or tab.closed:
+            return None
+        try:
+            return tab.window.evaluate_js(script)
+        except Exception as error:  # noqa: BLE001
+            self.logger.warning("evaluate_js failed on %s: %s", tab_id, error)
+            return None
+
+    def _on_tab_created(self, tab: BrowserTab) -> None:
+        """Handle tab creation lifecycle hook."""
+
+        self.logger.info("Created tab %s", tab.tab_id)
+
+    def _on_tab_closed(self, tab_id: str) -> None:
+        """Handle tab close lifecycle hook."""
+
+        self.logger.info("Closed tab %s", tab_id)
+
+    def _on_window_closed(self, tab_id: str) -> None:
+        """Handle native window close initiated by user."""
+
+        self.tabs.handle_window_closed(tab_id)
+        if not self.tabs.list_tabs() and not self._shutdown_requested:
+            self._shutdown_requested = True
+            webview.stop()
+
+    def _on_loaded(self, tab_id: str) -> None:
+        """Sync URL/title after navigation and inject toolbar overlay."""
+
+        tab = self.tabs.get_tab(tab_id)
+        if not tab or tab.closed:
             return
 
-        for bookmark in bookmarks:
-            label = bookmark.title or bookmark.url
-            self.bookmark_menu.add_command(
-                label=label[:40],
-                command=lambda target=bookmark.url: self.navigate(target),
-            )
+        info = self._read_page_info(tab)
+        if info["url"] and not (
+            tab.current_url == "browser://history" and info["url"].startswith("about:")
+        ):
+            tab.current_url = info["url"]
+        if info["title"]:
+            tab.title = info["title"]
 
-    def _show_history_page(self) -> None:
-        """Render the internal browser history page."""
+        if tab.current_url and tab.current_url != "about:blank":
+            tab.engine.record_visit(tab.current_url, tab.title)
 
-        tab = self.tabs.current_tab()
-        if not tab:
-            return
+        self._set_window_title(tab)
+        self._inject_toolbar(tab, status="Done")
 
-        rows = []
-        for index, record in enumerate(reversed(tab.engine.history.all_records()), start=1):
-            escaped_url = escape(record.url)
-            timestamp = record.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            rows.append(
-                f'<li><a href="{escaped_url}">{index}. {escaped_url}</a> '
-                f'<span style="color:#666">{timestamp}</span></li>'
-            )
+    def _set_window_title(self, tab: BrowserTab) -> None:
+        """Update native window title from page title."""
 
-        html_text = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Browsing History</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #fafafa; color: #222; }
-    h1 { font-size: 24px; }
-    ul { line-height: 1.7; }
-    a { color: #0645ad; }
-  </style>
-</head>
-<body>
-  <h1>Browsing History</h1>
-  <p>Click any entry to revisit that page.</p>
-  <ul>
-    %s
-  </ul>
-</body>
-</html>
-""" % "\n    ".join(rows or ["<li>No history yet</li>"])
+        title = f"{(tab.title or tab.current_url or 'New Tab')} - Browser v1"
+        if hasattr(tab.window, "set_title"):
+            tab.window.set_title(title)
 
-        result = tab.engine.render_html(
-            "browser://history",
-            html_text,
-            viewport_width=max(tab.canvas.winfo_width(), 300),
-            page_title="Browsing History",
-            record_history=False,
-        )
-        self._render_result(tab, result)
+    def _read_page_info(self, tab: BrowserTab) -> dict[str, str]:
+        """Read current URL and title from page JavaScript context."""
 
-    def _render_result(self, tab: BrowserTab, result: NavigationResult) -> None:
-        """Paint a navigation result into the current tab and update UI state."""
+        js = "JSON.stringify({url: location.href || '', title: document.title || ''});"
+        payload = self.eval_js(tab.tab_id, js)
+        if not payload:
+            return {"url": tab.current_url, "title": tab.title}
 
-        self.paint_engine.paint(
-            tab.canvas,
-            result.layout_root,
-            current_url=result.final_url,
-            navigate_callback=self.navigate,
-        )
-        visible_width = max(tab.canvas.winfo_width(), 300)
-        visible_height = max(tab.canvas.winfo_height(), int(result.layout_root.height))
-        tab.canvas.configure(scrollregion=(0, 0, visible_width, visible_height))
-        tab.title = result.page_title or result.final_url
-        tab.current_url = result.final_url
-        tab.last_response_size_bytes = result.response_size_bytes
-        if tab.tab_button is not None:
-            tab.tab_button.configure(text=tab.title[:25])
-        self.address_bar.set_url(result.final_url)
-        self.address_bar.set_done(result.response_size_bytes)
-        self._update_window_title(tab.title)
+        if isinstance(payload, str):
+            try:
+                data = json.loads(payload)
+                return {
+                    "url": str(data.get("url", "")),
+                    "title": str(data.get("title", "")),
+                }
+            except json.JSONDecodeError:
+                return {"url": tab.current_url, "title": tab.title}
 
-    def _update_window_title(self, page_title: str) -> None:
-        """Update the main window title bar with the active page title."""
+        if isinstance(payload, dict):
+            return {
+                "url": str(payload.get("url", "")),
+                "title": str(payload.get("title", "")),
+            }
 
-        clean_title = page_title.strip() or "Browser v1"
-        self.root.title(f"{clean_title} - Browser v1")
+        return {"url": tab.current_url, "title": tab.title}
 
-    def run(self) -> None:
-        """Run the browser UI loop."""
+    def _inject_toolbar(self, tab: BrowserTab, status: str) -> None:
+        """Inject floating toolbar HTML/CSS/JS into current page."""
 
-        self.event_loop.start()
-        self.root.mainloop()
+        tabs_data = [
+            {
+                "id": current.tab_id,
+                "title": (current.title or current.current_url or "New Tab")[:24],
+                "active": current.tab_id == tab.tab_id,
+            }
+            for current in self.tabs.list_tabs()
+        ]
+        bookmarks = [
+            {"title": (bookmark.title or bookmark.url)[:80], "url": bookmark.url}
+            for bookmark in self.bookmarks.load()
+        ]
 
-    def _bind_canvas_scrolling(self, canvas: tk.Canvas) -> None:
-        """Bind mouse wheel behavior for canvas scrolling."""
+        address = json.dumps(tab.current_url or self.HOME_URL)
+        status_text = json.dumps(status)
+        tabs_json = json.dumps(tabs_data)
+        bookmarks_json = json.dumps(bookmarks)
 
-        def on_mousewheel(event: tk.Event[tk.Misc]) -> None:
-            delta = int(-1 * (event.delta / 120))
-            canvas.yview_scroll(delta, "units")
+        script = f"""
+(function() {{
+  const existing = document.getElementById('__browser_toolbar_root');
+  if (existing) existing.remove();
 
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
+  const root = document.createElement('div');
+  root.id = '__browser_toolbar_root';
+  root.style.position = 'fixed';
+  root.style.top = '0';
+  root.style.left = '0';
+  root.style.right = '0';
+  root.style.zIndex = '2147483647';
+  root.style.background = '#f5f5f5';
+  root.style.borderBottom = '1px solid #ccc';
+  root.style.fontFamily = 'Segoe UI, Arial, sans-serif';
+  root.style.padding = '6px';
+
+  const tabs = {tabs_json};
+  const bookmarks = {bookmarks_json};
+
+  const tabRow = document.createElement('div');
+  tabRow.style.display = 'flex';
+  tabRow.style.gap = '6px';
+  tabRow.style.marginBottom = '6px';
+
+  tabs.forEach(function(t) {{
+    const btn = document.createElement('button');
+    btn.textContent = t.title;
+    btn.style.padding = '3px 8px';
+    btn.style.border = '1px solid #bbb';
+    btn.style.background = t.active ? '#fff' : '#ececec';
+    btn.onclick = function() {{ pywebview.api.switch_tab(t.id); }};
+
+    const close = document.createElement('button');
+    close.textContent = 'x';
+    close.style.marginLeft = '2px';
+    close.style.border = '1px solid #bbb';
+    close.onclick = function() {{ pywebview.api.close_tab(t.id); }};
+
+    const wrap = document.createElement('span');
+    wrap.appendChild(btn);
+    wrap.appendChild(close);
+    tabRow.appendChild(wrap);
+  }});
+
+  const plus = document.createElement('button');
+  plus.textContent = '+';
+  plus.style.padding = '3px 8px';
+  plus.onclick = function() {{ pywebview.api.new_tab(); }};
+  tabRow.appendChild(plus);
+
+  const row = document.createElement('div');
+  row.style.display = 'flex';
+  row.style.alignItems = 'center';
+  row.style.gap = '6px';
+
+  function mkBtn(text, action) {{
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.style.padding = '4px 8px';
+    b.onclick = action;
+    return b;
+  }}
+
+  row.appendChild(mkBtn('←', function() {{ pywebview.api.go_back(); }}));
+  row.appendChild(mkBtn('→', function() {{ pywebview.api.go_forward(); }}));
+  row.appendChild(mkBtn('⟳', function() {{ pywebview.api.refresh(); }}));
+  row.appendChild(mkBtn('★', function() {{ pywebview.api.add_bookmark(); }}));
+
+  const bm = document.createElement('select');
+  bm.style.maxWidth = '220px';
+  const defaultOpt = document.createElement('option');
+  defaultOpt.textContent = 'Bookmarks';
+  defaultOpt.value = '';
+  bm.appendChild(defaultOpt);
+  bookmarks.forEach(function(item) {{
+    const opt = document.createElement('option');
+    opt.value = item.url;
+    opt.textContent = item.title;
+    bm.appendChild(opt);
+  }});
+  bm.onchange = function() {{ if (bm.value) pywebview.api.open_bookmark(bm.value); }};
+  row.appendChild(bm);
+
+  const address = document.createElement('input');
+  address.type = 'text';
+  address.value = {address};
+  address.style.flex = '1';
+  address.style.minWidth = '220px';
+  address.style.padding = '4px 8px';
+  address.onkeydown = function(event) {{
+    if (event.key === 'Enter') pywebview.api.navigate(address.value);
+  }};
+  row.appendChild(address);
+
+  const status = document.createElement('span');
+  status.textContent = {status_text};
+  status.style.minWidth = '85px';
+  status.style.textAlign = 'right';
+  row.appendChild(status);
+
+  root.appendChild(tabRow);
+  root.appendChild(row);
+  document.documentElement.style.paddingTop = '88px';
+  document.body.style.paddingTop = '88px';
+  document.body.appendChild(root);
+}})();
+"""
+        self.eval_js(tab.tab_id, script)

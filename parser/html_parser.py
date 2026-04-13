@@ -7,6 +7,7 @@ import re
 from typing import Dict, List
 
 from parser.dom_tree import DOMElement, DOMNode, DOMText
+from utils.entities import decode_html_entities
 from utils.logger import get_logger
 
 
@@ -80,7 +81,7 @@ class HTMLTokenizer:
             if next_lt == -1:
                 next_lt = len(html)
             text = html[index:next_lt]
-            if text.strip():
+            if text:
                 tokens.append(HTMLToken("Text", text))
             index = next_lt
 
@@ -145,7 +146,8 @@ class HTMLParser:
                     continue
                 if parent_tag == "script":
                     continue
-                text_node = DOMText(token.value)
+                decoded_text = decode_html_entities(token.value)
+                text_node = DOMText(decoded_text)
                 stack[-1].appendChild(text_node)
                 continue
 
