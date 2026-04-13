@@ -28,6 +28,7 @@ class NavigationResult:
     layout_root: LayoutBox
     response_text: str
     page_title: str
+    response_size_bytes: int
 
 
 class BrowserEngine:
@@ -55,29 +56,71 @@ class BrowserEngine:
 
         normalized_url = self._normalize_url(url)
         response = self.http_client.fetch(normalized_url, method="GET")
+        return self._build_result(
+            final_url=self._build_final_url(response.url),
+            html_text=response.text,
+            status_code=response.status_code,
+            viewport_width=viewport_width,
+            record_history=record_history,
+            response_size_bytes=len(response.body),
+        )
 
-        html_text = response.text
+    def render_html(
+        self,
+        url: str,
+        html_text: str,
+        viewport_width: int = 1024,
+        page_title: str = "",
+        record_history: bool = False,
+        response_size_bytes: int | None = None,
+    ) -> NavigationResult:
+        """Render supplied HTML without performing a network fetch."""
+
+        if response_size_bytes is None:
+            response_size_bytes = len(html_text.encode("utf-8"))
+
+        return self._build_result(
+            final_url=url,
+            html_text=html_text,
+            status_code=200,
+            viewport_width=viewport_width,
+            record_history=record_history,
+            page_title=page_title,
+            response_size_bytes=response_size_bytes,
+        )
+
+    def _build_result(
+        self,
+        final_url: str,
+        html_text: str,
+        status_code: int,
+        viewport_width: int,
+        record_history: bool,
+        response_size_bytes: int,
+        page_title: str = "",
+    ) -> NavigationResult:
+        """Run the shared parse/render/layout pipeline for HTML text."""
+
         dom_root = self.html_parser.parse(html_text)
         css_text = self._collect_css(dom_root)
         css_rules = self.css_parser.parse(css_text)
         render_root = self.render_tree_builder.build(dom_root, css_rules)
         layout_root = self.layout_engine.layout(render_root, viewport_width=viewport_width)
-        page_title = self._extract_title(dom_root)
-
-        final_url = self._build_final_url(response.url)
+        resolved_title = page_title or self._extract_title(dom_root)
 
         if record_history:
             self.history.visit(final_url)
 
         result = NavigationResult(
             final_url=final_url,
-            status_code=response.status_code,
+            status_code=status_code,
             dom_root=dom_root,
             css_rules=css_rules,
             render_root=render_root,
             layout_root=layout_root,
             response_text=html_text,
-            page_title=page_title,
+            page_title=resolved_title,
+            response_size_bytes=response_size_bytes,
         )
         self._last_result = result
         self.logger.info("Navigation complete for %s", final_url)

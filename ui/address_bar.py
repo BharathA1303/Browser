@@ -49,4 +49,25 @@ class AddressBar(tk.Frame):
     def set_loading(self, loading: bool) -> None:
         """Update loading state label and entry enablement."""
 
-        self._status.set("Loading..." if loading else "Ready")
+        if loading:
+            self._status.set("Loading...")
+
+    def set_done(self, response_size_bytes: int | None = None) -> None:
+        """Show completion state with optional response size."""
+
+        if response_size_bytes is None:
+            self._status.set("Done")
+            return
+
+        size_kb = max(response_size_bytes / 1024.0, 0.0)
+        self._status.set(f"Done • {size_kb:.1f} KB")
+
+    def set_error(self) -> None:
+        """Show an error state after navigation failure."""
+
+        self._status.set("Error")
+
+    def set_ready(self) -> None:
+        """Show the idle ready state."""
+
+        self._status.set("Ready")
