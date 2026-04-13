@@ -1,0 +1,2 @@
+# Browser v1 intentionally uses Python standard library only.
+# No external dependencies are required for the current implementation.
