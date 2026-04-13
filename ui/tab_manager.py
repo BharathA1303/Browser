@@ -20,6 +20,8 @@ class BrowserTab:
     title: str = "New Tab"
     current_url: str = ""
     closed: bool = False
+    load_started_at: float | None = None
+    last_load_ms: int | None = None
 
 
 class TabManager:
@@ -38,30 +40,39 @@ class TabManager:
         self._active_tab_id: str | None = None
         self._counter = 0
 
-    def create_tab(self, home_url: str, js_api: object, tab_id: str | None = None) -> BrowserTab:
-        """Create a new WebView window tab and activate it."""
+    def allocate_tab_id(self) -> str:
+        """Reserve and return a unique tab identifier."""
+
+        self._counter += 1
+        return f"tab-{self._counter}"
+
+    def create_tab(
+        self,
+        home_url: str,
+        js_api: object,
+        tab_id: str | None = None,
+        html_content: str | None = None,
+    ) -> BrowserTab:
+        """Create a new WebView tab and activate it."""
 
         if tab_id is None:
             tab_id = self.allocate_tab_id()
+
         window = webview.create_window(
             title="New Tab - Browser v1",
-            url=home_url,
+            url=home_url if html_content is None else None,
+            html=html_content,
             js_api=js_api,
             width=1200,
             height=800,
             confirm_close=False,
+            background_color="#1e1e2e",
         )
         tab = BrowserTab(tab_id=tab_id, window=window, engine=BrowserEngine())
         self._tabs[tab_id] = tab
         self._active_tab_id = tab_id
         self._on_tab_created(tab)
         return tab
-
-    def allocate_tab_id(self) -> str:
-        """Reserve and return a unique tab identifier."""
-
-        self._counter += 1
-        return f"tab-{self._counter}"
 
     def get_tab(self, tab_id: str) -> Optional[BrowserTab]:
         """Get a tab by id."""
