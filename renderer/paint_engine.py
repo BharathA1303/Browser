@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Callable, Optional
 import tkinter as tk
 import tkinter.font as tkfont
@@ -29,13 +30,15 @@ class PaintEngine:
     ) -> None:
         """Paint a full layout tree to the canvas."""
 
-        canvas.delete("all")
+        self._safe_canvas_call(lambda: canvas.delete("all"), "delete all")
         self._link_targets.clear()
-        body_background = self._find_body_background(layout_root)
+        body_background = self.sanitize_color(self._find_body_background(layout_root))
         if body_background:
-            canvas.configure(bg=body_background)
+            self._safe_canvas_call(lambda: canvas.configure(bg=body_background), "configure canvas background")
         else:
-            canvas.configure(bg="white")
+            safe_default_bg = self.sanitize_color("#ffffff")
+            if safe_default_bg:
+                self._safe_canvas_call(lambda: canvas.configure(bg=safe_default_bg), "configure default canvas background")
         self._paint_box(
             canvas,
             layout_root,
@@ -49,14 +52,14 @@ class PaintEngine:
 
                 hit = self._link_item_at(canvas, event.x, event.y)
                 if hit is not None:
-                    canvas.configure(cursor="hand2")
+                    self._safe_canvas_call(lambda: canvas.configure(cursor="hand2"), "set hand cursor")
                 else:
-                    canvas.configure(cursor="arrow")
+                    self._safe_canvas_call(lambda: canvas.configure(cursor="arrow"), "set arrow cursor")
 
             def on_canvas_leave(_event: tk.Event[tk.Misc]) -> None:
                 """Restore default cursor when pointer leaves the canvas."""
 
-                canvas.configure(cursor="arrow")
+                self._safe_canvas_call(lambda: canvas.configure(cursor="arrow"), "restore arrow cursor")
 
             def on_canvas_click(event: tk.Event[tk.Misc]) -> None:
                 """Navigate when clicking a painted link region."""
@@ -65,9 +68,9 @@ class PaintEngine:
                 if hit is not None:
                     navigate_callback(self._link_targets[hit])
 
-            canvas.bind("<Motion>", on_canvas_motion)
-            canvas.bind("<Leave>", on_canvas_leave)
-            canvas.bind("<Button-1>", on_canvas_click)
+            self._safe_canvas_call(lambda: canvas.bind("<Motion>", on_canvas_motion), "bind motion handler")
+            self._safe_canvas_call(lambda: canvas.bind("<Leave>", on_canvas_leave), "bind leave handler")
+            self._safe_canvas_call(lambda: canvas.bind("<Button-1>", on_canvas_click), "bind click handler")
         self.logger.info("Paint complete")
 
     def _paint_box(
@@ -92,32 +95,75 @@ class PaintEngine:
             if href:
                 current_link_href = self._resolve_href(current_url, href)
 
-        background = style.get("background", style.get("background-color", ""))
-        border_color = style.get("border-color", "black")
+        background_raw = style.get("background", style.get("background-color", ""))
+        background = self.sanitize_color(background_raw)
+        border_color = self.sanitize_color(style.get("border-color", "#000000"))
         border_width = self._to_px(style.get("border-width", "0"))
 
+        # Skip unsupported background shorthand values like url(...) and gradients.
         if background and node.tag_name != "#text":
-            canvas.create_rectangle(
-                box.x,
-                box.y,
-                box.x + box.width,
-                box.y + box.height,
-                fill=background,
-                outline="",
+            self._safe_canvas_call(
+                lambda: canvas.create_rectangle(
+                    box.x,
+                    box.y,
+                    box.x + box.width,
+                    box.y + box.height,
+                    fill=background,
+                    outline="",
+                ),
+                "draw background rectangle",
             )
 
         if border_width > 0 and node.tag_name != "#text":
-            canvas.create_rectangle(
-                box.x,
-                box.y,
-                box.x + box.width,
-                box.y + box.height,
-                outline=border_color,
-                width=border_width,
-            )
+            safe_border_color = border_color or self.sanitize_color("#000000")
+            if safe_border_color:
+                self._safe_canvas_call(
+                    lambda: canvas.create_rectangle(
+                        box.x,
+                        box.y,
+                        box.x + box.width,
+                        box.y + box.height,
+                        outline=safe_border_color,
+                        width=border_width,
+                    ),
+                    "draw border rectangle",
+                )
+
+        if tag_name == "img":
+            placeholder_fill = self.sanitize_color("#e6e6e6")
+            placeholder_outline = self.sanitize_color("#b8b8b8")
+            placeholder_text_color = self.sanitize_color("#444444") or self.sanitize_color("#000000")
+            alt_text = node.attributes.get("alt", "image").strip() or "image"
+            if placeholder_fill and placeholder_outline:
+                self._safe_canvas_call(
+                    lambda: canvas.create_rectangle(
+                        box.x,
+                        box.y,
+                        box.x + box.width,
+                        box.y + box.height,
+                        fill=placeholder_fill,
+                        outline=placeholder_outline,
+                        width=1,
+                    ),
+                    "draw image placeholder rectangle",
+                )
+            if placeholder_text_color:
+                self._safe_canvas_call(
+                    lambda: canvas.create_text(
+                        box.x + (box.width / 2),
+                        box.y + (box.height / 2),
+                        text=alt_text,
+                        anchor="center",
+                        fill=placeholder_text_color,
+                        width=max(box.width - 8, 10),
+                        font=(CONFIG.default_font_family, int(CONFIG.default_font_size * 0.9)),
+                    ),
+                    "draw image placeholder text",
+                )
+            return
 
         if node.tag_name == "#text" and node.text_content.strip():
-            color = style.get("color", "black")
+            color = self.sanitize_color(style.get("color", "#000000")) or self.sanitize_color("#000000")
             font_size = int(self._to_px(style.get("font-size", str(CONFIG.default_font_size))) or CONFIG.default_font_size)
             font_weight = "bold" if style.get("font-weight", "").strip().lower() in {"bold", "700", "800", "900"} else "normal"
             is_link = bool(current_link_href)
@@ -127,16 +173,19 @@ class PaintEngine:
                 weight=font_weight,
                 underline=is_link,
             )
-            item_id = canvas.create_text(
-                box.x + 2,
-                box.y + 2,
-                text=node.text_content.strip(),
-                anchor="nw",
-                fill=color,
-                font=text_font,
+            item_id = self._safe_canvas_call(
+                lambda: canvas.create_text(
+                    box.x + 2,
+                    box.y + 2,
+                    text=node.text_content.strip(),
+                    anchor="nw",
+                    fill=color,
+                    font=text_font,
+                ),
+                "draw text",
             )
 
-            if is_link and navigate_callback:
+            if is_link and navigate_callback and isinstance(item_id, int):
                 resolved_href = current_link_href
                 self._link_targets[item_id] = resolved_href
 
@@ -148,16 +197,16 @@ class PaintEngine:
                 def on_enter(_event: tk.Event[tk.Misc]) -> None:
                     """Show pointer cursor when hovering over link text."""
 
-                    canvas.configure(cursor="hand2")
+                    self._safe_canvas_call(lambda: canvas.configure(cursor="hand2"), "set hand cursor on link enter")
 
                 def on_leave(_event: tk.Event[tk.Misc]) -> None:
                     """Restore default cursor when leaving link text."""
 
-                    canvas.configure(cursor="arrow")
+                    self._safe_canvas_call(lambda: canvas.configure(cursor="arrow"), "set arrow cursor on link leave")
 
-                canvas.tag_bind(item_id, "<Button-1>", on_click)
-                canvas.tag_bind(item_id, "<Enter>", on_enter)
-                canvas.tag_bind(item_id, "<Leave>", on_leave)
+                self._safe_canvas_call(lambda: canvas.tag_bind(item_id, "<Button-1>", on_click), "bind link click")
+                self._safe_canvas_call(lambda: canvas.tag_bind(item_id, "<Enter>", on_enter), "bind link enter")
+                self._safe_canvas_call(lambda: canvas.tag_bind(item_id, "<Leave>", on_leave), "bind link leave")
 
         self.logger.debug("Paint call: %s", node.tag_name)
         for child in box.children:
@@ -244,3 +293,49 @@ class PaintEngine:
             if item in self._link_targets:
                 return item
         return None
+
+    def sanitize_color(self, value: str) -> str:
+        """Convert CSS color input into a safe tkinter color or empty string."""
+
+        raw = (value or "").strip().lower()
+        if not raw:
+            return ""
+        if raw in {"transparent", "inherit", "none"}:
+            return ""
+        if raw.startswith("url("):
+            return ""
+        if "gradient" in raw:
+            return ""
+
+        hex_match = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", raw)
+        if hex_match:
+            if len(raw) == 4:
+                return "#" + "".join([char * 2 for char in raw[1:]])
+            return raw
+
+        rgb_match = re.fullmatch(
+            r"rgba?\(\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)",
+            raw,
+        )
+        if rgb_match:
+            r_val = int(rgb_match.group(1))
+            g_val = int(rgb_match.group(2))
+            b_val = int(rgb_match.group(3))
+            r_val = max(0, min(255, r_val))
+            g_val = max(0, min(255, g_val))
+            b_val = max(0, min(255, b_val))
+            return f"#{r_val:02x}{g_val:02x}{b_val:02x}"
+
+        if "," in raw:
+            return ""
+
+        return ""
+
+    def _safe_canvas_call(self, action: Callable[[], object], context: str) -> object | None:
+        """Execute a canvas call safely and log Tcl errors without crashing paint."""
+
+        try:
+            return action()
+        except tk.TclError as error:
+            self.logger.warning("Canvas draw skipped (%s): %s", context, error)
+            return None

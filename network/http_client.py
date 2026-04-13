@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gzip
 import socket
 from typing import Dict, Optional
 
@@ -66,11 +67,18 @@ class HTTPClient:
         if method not in {"GET", "POST"}:
             raise HTTPClientError(f"Unsupported method: {method}")
 
+        host_header = parsed_url.host
+        default_port = 443 if parsed_url.scheme == "https" else 80
+        if parsed_url.port != default_port:
+            host_header = f"{host_header}:{parsed_url.port}"
+
         merged_headers: Dict[str, str] = {
-            "Host": parsed_url.host,
-            "User-Agent": CONFIG.user_agent,
+            "Host": host_header,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "identity",
             "Connection": "close",
-            "Accept": "*/*",
         }
         if headers:
             merged_headers.update(headers)
@@ -169,6 +177,13 @@ class HTTPClient:
         content_length = self._header_lookup(headers, "Content-Length")
         if content_length.isdigit():
             body = body[: int(content_length)]
+
+        content_encoding = self._header_lookup(headers, "Content-Encoding").lower()
+        if content_encoding == "gzip":
+            try:
+                body = gzip.decompress(body)
+            except (OSError, EOFError) as error:
+                raise HTTPClientError("Failed to decompress gzip response") from error
 
         self.logger.info("Response %s %s bytes", status_code, len(body))
         return HTTPResponse(

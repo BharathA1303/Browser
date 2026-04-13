@@ -102,7 +102,7 @@ class BrowserEngine:
         """Run the shared parse/render/layout pipeline for HTML text."""
 
         dom_root = self.html_parser.parse(html_text)
-        css_text = self._collect_css(dom_root)
+        css_text = self._collect_css(dom_root, final_url)
         css_rules = self.css_parser.parse(css_text)
         render_root = self.render_tree_builder.build(dom_root, css_rules)
         layout_root = self.layout_engine.layout(render_root, viewport_width=viewport_width)
@@ -136,10 +136,12 @@ class BrowserEngine:
             cleaned = f"http://{cleaned}"
         return cleaned
 
-    def _collect_css(self, dom_root: DOMElement) -> str:
-        """Collect parser-extracted style blocks and inline style attributes."""
+    def _collect_css(self, dom_root: DOMElement, base_url: str) -> str:
+        """Collect inline, external, and element style attributes."""
 
         style_text = "\n".join(self.html_parser.extracted_style_blocks)
+
+        style_text += self._fetch_external_css(dom_root, base_url)
 
         for node in dom_root.getElementsByTagName("*"):
             inline = node.attributes.get("style")
@@ -147,6 +149,73 @@ class BrowserEngine:
                 selector = self._selector_for_node(node)
                 style_text += f"\n{selector}{{{inline}}}"
         return style_text
+
+    def _fetch_external_css(self, dom_root: DOMElement, base_url: str) -> str:
+        """Fetch CSS from link rel=stylesheet tags and merge as text."""
+
+        if not base_url.startswith(("http://", "https://")):
+            return ""
+
+        css_fragments: list[str] = []
+        for link_node in dom_root.getElementsByTagName("link"):
+            rel_value = self._get_attribute(link_node.attributes, "rel").lower()
+            href_value = self._get_attribute(link_node.attributes, "href").strip()
+            if "stylesheet" not in rel_value or not href_value:
+                continue
+
+            css_url = self._resolve_relative_url(base_url, href_value)
+            try:
+                css_response = self.http_client.fetch(css_url, method="GET")
+                css_fragments.append(css_response.text)
+                self.logger.info("Loaded external stylesheet %s", css_url)
+            except Exception as error:  # noqa: BLE001
+                self.logger.warning("Failed stylesheet fetch %s: %s", css_url, error)
+
+        if not css_fragments:
+            return ""
+        return "\n" + "\n".join(css_fragments)
+
+    def _get_attribute(self, attributes: dict[str, str], name: str) -> str:
+        """Read an HTML attribute by name, case-insensitively."""
+
+        for key, value in attributes.items():
+            if key.lower() == name.lower():
+                return value
+        return ""
+
+    def _resolve_relative_url(self, base_url: str, target: str) -> str:
+        """Resolve an absolute or relative URL against a page URL."""
+
+        href = target.strip()
+        if not href:
+            return base_url
+        if href.startswith("//"):
+            scheme = base_url.split(":", 1)[0]
+            return f"{scheme}:{href}"
+        if "://" in href:
+            return href
+
+        scheme, rest = base_url.split("://", 1)
+        authority = rest.split("/", 1)[0]
+        base_path = "/"
+        if "/" in rest:
+            base_path = "/" + rest.split("/", 1)[1]
+        path_part = base_path.split("?", 1)[0].split("#", 1)[0]
+
+        if href.startswith("/"):
+            return f"{scheme}://{authority}{href}"
+
+        directory = path_part.rsplit("/", 1)[0]
+        if not directory.startswith("/"):
+            directory = f"/{directory}" if directory else ""
+        if directory.endswith("/"):
+            resolved_path = f"{directory}{href}"
+        elif directory:
+            resolved_path = f"{directory}/{href}"
+        else:
+            resolved_path = f"/{href}"
+
+        return f"{scheme}://{authority}{resolved_path}"
 
     def _selector_for_node(self, node: object) -> str:
         """Create a simple selector targeting one node for inline style fallback."""

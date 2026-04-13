@@ -66,6 +66,31 @@ class LayoutEngine:
         if font_size <= 0:
             font_size = parent_font_size
 
+        if node.dom_node.tag_name.lower() == "img":
+            img_width = self._to_px(style.get("width", "0"))
+            img_height = self._to_px(style.get("height", "0"))
+            attr_width = node.dom_node.attributes.get("width", "").strip()
+            attr_height = node.dom_node.attributes.get("height", "").strip()
+
+            if img_width <= 0 and attr_width.isdigit():
+                img_width = float(attr_width)
+            if img_height <= 0 and attr_height.isdigit():
+                img_height = float(attr_height)
+
+            if img_width <= 0:
+                img_width = min(300.0, available_width)
+            if img_height <= 0:
+                img_height = 180.0
+
+            return LayoutBox(
+                render_node=node,
+                x=x,
+                y=y,
+                width=img_width + 2 * (padding + border),
+                height=img_height + 2 * (padding + border),
+                children=[],
+            )
+
         box = LayoutBox(render_node=node, x=x, y=y, width=width + 2 * (padding + border), height=0)
 
         display = style.get("display", "block").strip().lower()
